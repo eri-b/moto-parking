@@ -19,11 +19,29 @@ window.initMap = function initMap() {
     zoom: 12,
   });
 
+  const infoWindow = new google.maps.InfoWindow();
+
   locations.forEach((location) => {
-    new google.maps.Marker({
+    const marker = new google.maps.Marker({
       map,
       position: location.position,
       title: location.title,
+      icon: {
+        path: google.maps.SymbolPath.CIRCLE,
+        scale: 6,
+        fillColor: "#4a90e2",
+        fillOpacity: 0.85,
+        strokeColor: "#2c5d8a",
+        strokeWeight: 1,
+      },
+    });
+
+    marker.addListener("click", () => {
+      infoWindow.setContent(location.title);
+      infoWindow.open({
+        map,
+        anchor: marker,
+      });
     });
   });
 };
