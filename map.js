@@ -29,9 +29,9 @@ window.initMap = function initMap() {
       icon: {
         path: google.maps.SymbolPath.CIRCLE,
         scale: 6,
-        fillColor: "#4a90e2",
-        fillOpacity: 0.85,
-        strokeColor: "#2c5d8a",
+        fillColor: "#e2da4aff",
+        fillOpacity: 0.95,
+        strokeColor: "#8a882cff",
         strokeWeight: 1,
       },
     });
