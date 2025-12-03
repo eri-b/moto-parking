@@ -1,18 +1,8 @@
 // Center on Chinatown, Manhattan
 const nycCenter = { lat: 40.7158, lng: -73.9970 };
 
-const sampleLocations = [
-  { title: "Times Square", position: { lat: 40.758, lng: -73.9855 } },
-  { title: "Central Park", position: { lat: 40.7812, lng: -73.9665 } },
-  { title: "Brooklyn Bridge Park", position: { lat: 40.7003, lng: -73.9967 } },
-  { title: "Prospect Park", position: { lat: 40.6602, lng: -73.969 } },
-  { title: "Battery Park", position: { lat: 40.7033, lng: -74.017 } },
-  { title: "Yankee Stadium", position: { lat: 40.8296, lng: -73.9262 } },
-  { title: "High Line", position: { lat: 40.7479, lng: -74.0049 } },
-  { title: "Astoria Park", position: { lat: 40.7795, lng: -73.9228 } },
-  { title: "Flushing Meadows Park", position: { lat: 40.7498, lng: -73.8408 } },
-  { title: "Staten Island Ferry", position: { lat: 40.6437, lng: -74.073 } },
-];
+const BOROUGH_OPTIONS = ["Manhattan", "Brooklyn", "Queens", "Bronx"];
+let selectedBoroughs = new Set(["MANHATTAN"]);
 
 function createMarker(map, infoWindow, { position, title, icon, infoHtml }) {
   const marker = new google.maps.Marker({
@@ -56,26 +46,6 @@ async function loadSourceData() {
   return parseCsv(text);
 }
 
-function renderSampleMarkers(map, infoWindow) {
-  const yellowIcon = {
-    path: google.maps.SymbolPath.CIRCLE,
-    scale: 6,
-    fillColor: "#e2da4aff",
-    fillOpacity: 0.95,
-    strokeColor: "#8a882cff",
-    strokeWeight: 1,
-  };
-
-  sampleLocations.forEach((location) => {
-    createMarker(map, infoWindow, {
-      position: location.position,
-      title: location.title,
-      icon: yellowIcon,
-      infoHtml: location.title,
-    });
-  });
-}
-
 let aspRecords = [];
 let aspMarkers = [];
 
@@ -101,6 +71,9 @@ function renderAspMarkersInView(map, infoWindow) {
   };
 
   aspRecords.forEach((rec) => {
+    const borough = (rec.borough || "").toUpperCase();
+    if (!selectedBoroughs.has(borough)) return;
+
     const lat = parseFloat(rec.sign_x_coord_lat);
     const lng = parseFloat(rec.sign_y_coord_lon);
     if (Number.isNaN(lat) || Number.isNaN(lng)) return;
@@ -129,6 +102,39 @@ function renderAspMarkersInView(map, infoWindow) {
   });
 }
 
+function setupBoroughFilters(onChange) {
+  const container = document.getElementById("borough-filters");
+  if (!container) return;
+
+  BOROUGH_OPTIONS.forEach((name) => {
+    const id = `borough-${name.toLowerCase()}`;
+    const label = document.createElement("label");
+    label.style.marginRight = "14px";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.id = id;
+    checkbox.name = id;
+    checkbox.checked = selectedBoroughs.has(name.toUpperCase());
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        selectedBoroughs.add(name.toUpperCase());
+      } else {
+        selectedBoroughs.delete(name.toUpperCase());
+      }
+      onChange();
+    });
+
+    const text = document.createElement("span");
+    text.textContent = name;
+    text.style.marginLeft = "4px";
+
+    label.appendChild(checkbox);
+    label.appendChild(text);
+    container.appendChild(label);
+  });
+}
+
 window.initMap = async function initMap() {
   const map = new google.maps.Map(document.getElementById("map"), {
     center: nycCenter,
@@ -136,8 +142,7 @@ window.initMap = async function initMap() {
   });
 
   const infoWindow = new google.maps.InfoWindow();
-
-  renderSampleMarkers(map, infoWindow);
+  setupBoroughFilters(() => renderAspMarkersInView(map, infoWindow));
 
   try {
     aspRecords = await loadSourceData();

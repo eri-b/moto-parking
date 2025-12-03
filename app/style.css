@@ -17,6 +17,11 @@ body {
   font-weight: 600;
   font-size: 15px;
 }
+
+.controls {
+  margin-top: 10px;
+  margin-bottom: 12px;
+}
 #map {
   flex: 1;
   width: 100%;
