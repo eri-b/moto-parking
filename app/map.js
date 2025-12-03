@@ -1,4 +1,5 @@
-const nycCenter = { lat: 40.7128, lng: -74.006 }; // Manhattan
+// Center on Chinatown, Manhattan
+const nycCenter = { lat: 40.7158, lng: -73.9970 };
 
 const sampleLocations = [
   { title: "Times Square", position: { lat: 40.758, lng: -73.9855 } },
@@ -28,6 +29,8 @@ function createMarker(map, infoWindow, { position, title, icon, infoHtml }) {
       anchor: marker,
     });
   });
+
+  return marker;
 }
 
 function parseCsv(text) {
@@ -73,7 +76,21 @@ function renderSampleMarkers(map, infoWindow) {
   });
 }
 
-function renderAspMarkers(map, infoWindow, records) {
+let aspRecords = [];
+let aspMarkers = [];
+
+function clearAspMarkers() {
+  aspMarkers.forEach((m) => m.setMap(null));
+  aspMarkers = [];
+}
+
+function renderAspMarkersInView(map, infoWindow) {
+  if (!aspRecords.length) return;
+  const bounds = map.getBounds();
+  if (!bounds) return;
+
+  clearAspMarkers();
+
   const redIcon = {
     path: google.maps.SymbolPath.CIRCLE,
     scale: 6,
@@ -83,10 +100,12 @@ function renderAspMarkers(map, infoWindow, records) {
     strokeWeight: 1,
   };
 
-  records.forEach((rec) => {
+  aspRecords.forEach((rec) => {
     const lat = parseFloat(rec.sign_x_coord_lat);
     const lng = parseFloat(rec.sign_y_coord_lon);
     if (Number.isNaN(lat) || Number.isNaN(lng)) return;
+
+    if (!bounds.contains({ lat, lng })) return;
 
     const title = `${rec.on_street || ""} (${rec.borough || ""})`;
     const infoHtml = `
@@ -99,19 +118,21 @@ function renderAspMarkers(map, infoWindow, records) {
       </div>
     `;
 
-    createMarker(map, infoWindow, {
+    const marker = createMarker(map, infoWindow, {
       position: { lat, lng },
       title,
       icon: redIcon,
       infoHtml,
     });
+
+    aspMarkers.push(marker);
   });
 }
 
 window.initMap = async function initMap() {
   const map = new google.maps.Map(document.getElementById("map"), {
     center: nycCenter,
-    zoom: 12,
+    zoom: 15,
   });
 
   const infoWindow = new google.maps.InfoWindow();
@@ -119,8 +140,9 @@ window.initMap = async function initMap() {
   renderSampleMarkers(map, infoWindow);
 
   try {
-    const records = await loadSourceData();
-    renderAspMarkers(map, infoWindow, records);
+    aspRecords = await loadSourceData();
+    renderAspMarkersInView(map, infoWindow);
+    map.addListener("idle", () => renderAspMarkersInView(map, infoWindow));
   } catch (err) {
     console.error(err);
   }

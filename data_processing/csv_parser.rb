@@ -40,7 +40,10 @@ CSV.open(OUTPUT, 'w') do |out|
   first_row = true
 
   CSV.foreach(INPUT, headers: true) do |row|
-    # 1) Filter on BROOM in the sign description (ASP indicator)
+    # 1) Filter on borough (Manhattan only) and BROOM in the sign description (ASP indicator)
+    borough = (row['borough'] || row['Borough'] || '').strip
+    next unless borough.casecmp('Manhattan').zero?
+
     desc = row['sign_description'] || row['Sign Description'] || ''
     next unless desc.upcase.include?('BROOM')
 
@@ -73,7 +76,7 @@ CSV.open(OUTPUT, 'w') do |out|
 
     # 5) Write the filtered row with the computed value (lat/lon flipped per column names requested)
     out << [
-      row['borough'],
+      borough,
       row['on_street'],
       row['from_street'],
       row['to_street'],
