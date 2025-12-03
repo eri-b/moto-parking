@@ -1,0 +1,17 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rgeo (3.0.1)
+    rgeo-proj4 (4.0.0)
+      rgeo (~> 3.0.0)
+
+PLATFORMS
+  arm64-darwin-24
+  ruby
+
+DEPENDENCIES
+  rgeo
+  rgeo-proj4
+
+BUNDLED WITH
+   2.7.2
