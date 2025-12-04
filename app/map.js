@@ -2,7 +2,15 @@
 const nycCenter = { lat: 40.7158, lng: -73.9970 };
 
 const BOROUGH_OPTIONS = ["Manhattan", "Brooklyn", "Queens", "Bronx"];
+const MARKER_ZOOM_THRESHOLD = 16;
+const IDLE_DEBOUNCE_MS = 200;
+
 let selectedBoroughs = new Set(["MANHATTAN"]);
+let heatmapLayer = null;
+let idleTimer = null;
+const markerCache = new Map();
+const activeMarkerKeys = new Set();
+let cachedRedIcon = null;
 
 function createMarker(map, infoWindow, { position, title, icon, infoHtml }) {
   const marker = new google.maps.Marker({
@@ -21,6 +29,27 @@ function createMarker(map, infoWindow, { position, title, icon, infoHtml }) {
   });
 
   return marker;
+}
+
+function getRedIcon() {
+  if (cachedRedIcon) return cachedRedIcon;
+  cachedRedIcon = {
+    path: google.maps.SymbolPath.CIRCLE,
+    scale: 6,
+    fillColor: "#e53935",
+    fillOpacity: 0.95,
+    strokeColor: "#b71c1c",
+    strokeWeight: 1,
+  };
+  return cachedRedIcon;
+}
+
+function getRecordKey(rec) {
+  const lat = rec.sign_x_coord_lat || "";
+  const lng = rec.sign_y_coord_lon || "";
+  const street = (rec.on_street || "").toUpperCase();
+  const borough = (rec.borough || "").toUpperCase();
+  return `${lat}|${lng}|${street}|${borough}`;
 }
 
 function parseCsv(text) {
@@ -47,28 +76,24 @@ async function loadSourceData() {
 }
 
 let aspRecords = [];
-let aspMarkers = [];
 
-function clearAspMarkers() {
-  aspMarkers.forEach((m) => m.setMap(null));
-  aspMarkers = [];
+function hideActiveMarkers() {
+  const toRemove = Array.from(activeMarkerKeys);
+  toRemove.forEach((key) => {
+    const marker = markerCache.get(key);
+    if (marker) marker.setMap(null);
+    activeMarkerKeys.delete(key);
+  });
 }
 
-function renderAspMarkersInView(map, infoWindow) {
+function updateVisualization(map, infoWindow) {
   if (!aspRecords.length) return;
   const bounds = map.getBounds();
   if (!bounds) return;
 
-  clearAspMarkers();
-
-  const redIcon = {
-    path: google.maps.SymbolPath.CIRCLE,
-    scale: 6,
-    fillColor: "#e53935",
-    fillOpacity: 0.95,
-    strokeColor: "#b71c1c",
-    strokeWeight: 1,
-  };
+  const useHeatmap = map.getZoom() < MARKER_ZOOM_THRESHOLD;
+  const nextActiveKeys = new Set();
+  const heatmapPoints = [];
 
   aspRecords.forEach((rec) => {
     const borough = (rec.borough || "").toUpperCase();
@@ -77,29 +102,67 @@ function renderAspMarkersInView(map, infoWindow) {
     const lat = parseFloat(rec.sign_x_coord_lat);
     const lng = parseFloat(rec.sign_y_coord_lon);
     if (Number.isNaN(lat) || Number.isNaN(lng)) return;
+    const position = { lat, lng };
 
-    if (!bounds.contains({ lat, lng })) return;
+    if (useHeatmap) {
+      if (bounds.contains(position)) {
+        heatmapPoints.push(new google.maps.LatLng(lat, lng));
+      }
+      return;
+    }
 
-    const title = `${rec.on_street || ""} (${rec.borough || ""})`;
-    const infoHtml = `
-      <div style="max-width: 260px; font-size: 13px;">
-        <div style="font-weight: 600; margin-bottom: 4px;">${rec.on_street || ""} (${rec.borough || ""})</div>
-        <div><strong>From:</strong> ${rec.from_street || ""}</div>
-        <div><strong>To:</strong> ${rec.to_street || ""}</div>
-        <div style="margin-top: 6px;">${rec.sign_description || ""}</div>
-        <div style="margin-top: 8px;"><a href="https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lng}" target="_blank" rel="noopener">Open Street View</a></div>
-      </div>
-    `;
+    if (!bounds.contains(position)) return;
 
-    const marker = createMarker(map, infoWindow, {
-      position: { lat, lng },
-      title,
-      icon: redIcon,
-      infoHtml,
-    });
+    const key = getRecordKey(rec);
+    let marker = markerCache.get(key);
+    if (!marker) {
+      const title = `${rec.on_street || ""} (${rec.borough || ""})`;
+      const infoHtml = `
+        <div style="max-width: 260px; font-size: 13px;">
+          <div style="font-weight: 600; margin-bottom: 4px;">${rec.on_street || ""} (${rec.borough || ""})</div>
+          <div><strong>From:</strong> ${rec.from_street || ""}</div>
+          <div><strong>To:</strong> ${rec.to_street || ""}</div>
+          <div style="margin-top: 6px;">${rec.sign_description || ""}</div>
+          <div style="margin-top: 8px;"><a href="https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lng}" target="_blank" rel="noopener">Open Street View</a></div>
+        </div>
+      `;
 
-    aspMarkers.push(marker);
+      marker = createMarker(map, infoWindow, {
+        position,
+        title,
+        icon: getRedIcon(),
+        infoHtml,
+      });
+      markerCache.set(key, marker);
+    } else if (!marker.getMap()) {
+      marker.setMap(map);
+    }
+
+    nextActiveKeys.add(key);
   });
+
+  if (useHeatmap) {
+    hideActiveMarkers();
+    if (!heatmapLayer) {
+      heatmapLayer = new google.maps.visualization.HeatmapLayer({ radius: 24 });
+    }
+    heatmapLayer.setData(heatmapPoints);
+    heatmapLayer.setMap(heatmapPoints.length ? map : null);
+    return;
+  }
+
+  if (heatmapLayer) {
+    heatmapLayer.setMap(null);
+  }
+
+  const toRemove = Array.from(activeMarkerKeys).filter((key) => !nextActiveKeys.has(key));
+  toRemove.forEach((key) => {
+    const marker = markerCache.get(key);
+    if (marker) marker.setMap(null);
+    activeMarkerKeys.delete(key);
+  });
+
+  nextActiveKeys.forEach((key) => activeMarkerKeys.add(key));
 }
 
 function setupBoroughFilters(onChange) {
@@ -142,12 +205,15 @@ window.initMap = async function initMap() {
   });
 
   const infoWindow = new google.maps.InfoWindow();
-  setupBoroughFilters(() => renderAspMarkersInView(map, infoWindow));
+  setupBoroughFilters(() => updateVisualization(map, infoWindow));
 
   try {
     aspRecords = await loadSourceData();
-    renderAspMarkersInView(map, infoWindow);
-    map.addListener("idle", () => renderAspMarkersInView(map, infoWindow));
+    updateVisualization(map, infoWindow);
+    map.addListener("idle", () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => updateVisualization(map, infoWindow), IDLE_DEBOUNCE_MS);
+    });
   } catch (err) {
     console.error(err);
   }
