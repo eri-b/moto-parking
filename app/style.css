@@ -10,7 +10,7 @@ body {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  background: #eee;
+  background: #ffcfcf;
   font-size: 14px;
 }
 .title{
