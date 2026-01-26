@@ -4,6 +4,8 @@ This map shows where you can park your motorcycle/Vespa for free in NYC
 
 [parkgratis.com](https://parkgratis.com)
 
+[More info](https://unfoundedlabs.com/blog/nyc-moto-parking)
+
 ### Serving the Map
 
 To run locally:
