@@ -10,7 +10,7 @@ body {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  background-color: #ffcfcf;
+  background-color: #d6d2c3;
   transition: 0.5s;
   font-size: 14px;
 }
