@@ -5,12 +5,30 @@ const BOROUGH_OPTIONS = ["Manhattan", "Brooklyn", "Queens", "Bronx"];
 const MARKER_ZOOM_THRESHOLD = 16;
 const IDLE_DEBOUNCE_MS = 200;
 
+function preventIosPinchZoom() {
+  const handler = (event) => event.preventDefault();
+  document.addEventListener("gesturestart", handler, { passive: false });
+  document.addEventListener("gesturechange", handler, { passive: false });
+  document.addEventListener("gestureend", handler, { passive: false });
+  document.addEventListener(
+    "touchmove",
+    (event) => {
+      if (typeof event.scale === "number" && event.scale !== 1) {
+        event.preventDefault();
+      }
+    },
+    { passive: false }
+  );
+}
+
 let selectedBoroughs = new Set(["MANHATTAN"]);
 let heatmapLayer = null;
 let idleTimer = null;
 const markerCache = new Map();
 const activeMarkerKeys = new Set();
 let cachedRedIcon = null;
+
+preventIosPinchZoom();
 
 function createMarker(map, infoWindow, { position, title, icon, infoHtml }) {
   const marker = new google.maps.Marker({
