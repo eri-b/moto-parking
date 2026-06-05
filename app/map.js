@@ -23,6 +23,7 @@ function preventIosPinchZoom() {
 
 let selectedBoroughs = new Set(["MANHATTAN"]);
 let heatmapLayer = null;
+let HeatmapOverlay = null;
 let idleTimer = null;
 const markerCache = new Map();
 const activeMarkerKeys = new Set();
@@ -68,6 +69,91 @@ function getRecordKey(rec) {
   const street = (rec.on_street || "").toUpperCase();
   const borough = (rec.borough || "").toUpperCase();
   return `${lat}|${lng}|${street}|${borough}`;
+}
+
+function getHeatmapOverlayClass() {
+  if (HeatmapOverlay) return HeatmapOverlay;
+
+  HeatmapOverlay = class extends google.maps.OverlayView {
+    constructor({ radius = 24 } = {}) {
+      super();
+      this.radius = radius;
+      this.data = [];
+      this.canvas = null;
+      this.map = null;
+    }
+
+    setData(data) {
+      this.data = data;
+      this.draw();
+    }
+
+    setMap(map) {
+      this.map = map;
+      super.setMap(map);
+    }
+
+    onAdd() {
+      this.canvas = document.createElement("canvas");
+      this.canvas.style.position = "absolute";
+      this.canvas.style.pointerEvents = "none";
+      this.getPanes().overlayLayer.appendChild(this.canvas);
+    }
+
+    onRemove() {
+      if (this.canvas && this.canvas.parentNode) {
+        this.canvas.parentNode.removeChild(this.canvas);
+      }
+      this.canvas = null;
+    }
+
+    draw() {
+      if (!this.canvas || !this.map) return;
+
+      const projection = this.getProjection();
+      const bounds = this.map.getBounds();
+      if (!projection || !bounds) return;
+
+      const northEast = projection.fromLatLngToDivPixel(bounds.getNorthEast());
+      const southWest = projection.fromLatLngToDivPixel(bounds.getSouthWest());
+      const left = southWest.x;
+      const top = northEast.y;
+      const width = Math.max(1, northEast.x - southWest.x);
+      const height = Math.max(1, southWest.y - northEast.y);
+      const dpr = window.devicePixelRatio || 1;
+
+      this.canvas.style.left = `${left}px`;
+      this.canvas.style.top = `${top}px`;
+      this.canvas.style.width = `${width}px`;
+      this.canvas.style.height = `${height}px`;
+      this.canvas.width = Math.ceil(width * dpr);
+      this.canvas.height = Math.ceil(height * dpr);
+
+      const context = this.canvas.getContext("2d");
+      if (!context) return;
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      context.clearRect(0, 0, width, height);
+
+      this.data.forEach((point) => {
+        const pixel = projection.fromLatLngToDivPixel(point);
+        if (!pixel) return;
+
+        const x = pixel.x - left;
+        const y = pixel.y - top;
+        const gradient = context.createRadialGradient(x, y, 0, x, y, this.radius);
+        gradient.addColorStop(0, "rgba(229, 57, 53, 0.55)");
+        gradient.addColorStop(0.45, "rgba(255, 152, 0, 0.28)");
+        gradient.addColorStop(1, "rgba(255, 235, 59, 0)");
+
+        context.fillStyle = gradient;
+        context.beginPath();
+        context.arc(x, y, this.radius, 0, Math.PI * 2);
+        context.fill();
+      });
+    }
+  };
+
+  return HeatmapOverlay;
 }
 
 function parseCsv(text) {
@@ -162,7 +248,8 @@ function updateVisualization(map, infoWindow) {
   if (useHeatmap) {
     hideActiveMarkers();
     if (!heatmapLayer) {
-      heatmapLayer = new google.maps.visualization.HeatmapLayer({ radius: 24 });
+      const Heatmap = getHeatmapOverlayClass();
+      heatmapLayer = new Heatmap({ radius: 24 });
     }
     heatmapLayer.setData(heatmapPoints);
     heatmapLayer.setMap(heatmapPoints.length ? map : null);
