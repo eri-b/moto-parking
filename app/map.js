@@ -1,325 +1,259 @@
-// Center on Chinatown, Manhattan
-const nycCenter = { lat: 40.7158, lng: -73.9970 };
+const BOROUGHS = ['Manhattan', 'Brooklyn', 'Queens', 'Bronx'];
+const boroughData = new Map();
+const pendingLoads = new Map();
+const loadErrors = new Set();
+const activeMarkers = new Map();
+let map;
+let infoWindow;
+let openMarker = null;
+let manifest;
+let manifestRequest;
+let idleTimer;
+let renderQueued = false;
+let mapUnavailable = false;
 
-const BOROUGH_OPTIONS = ["Manhattan", "Brooklyn", "Queens", "Bronx"];
-const MARKER_ZOOM_THRESHOLD = 16;
-const IDLE_DEBOUNCE_MS = 200;
+const status = document.getElementById('map-status');
+const retryButton = document.getElementById('retry-load');
+const freshness = document.getElementById('data-freshness');
 
-function preventIosPinchZoom() {
-  const handler = (event) => event.preventDefault();
-  document.addEventListener("gesturestart", handler, { passive: false });
-  document.addEventListener("gesturechange", handler, { passive: false });
-  document.addEventListener("gestureend", handler, { passive: false });
-  document.addEventListener(
-    "touchmove",
-    (event) => {
-      if (typeof event.scale === "number" && event.scale !== 1) {
-        event.preventDefault();
-      }
-    },
-    { passive: false }
-  );
+function showStatus(message, retry = false) {
+  status.textContent = message;
+  retryButton.hidden = !retry;
 }
 
-let selectedBoroughs = new Set(["MANHATTAN"]);
-let heatmapLayer = null;
-let HeatmapOverlay = null;
-let idleTimer = null;
-const markerCache = new Map();
-const activeMarkerKeys = new Set();
-let cachedRedIcon = null;
+async function fetchJson(path) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  try {
+    const response = await fetch(path, { signal: controller.signal });
+    if (!response.ok) throw new Error(`Unable to load ${path}: ${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
-preventIosPinchZoom();
+async function loadManifest() {
+  if (!manifestRequest) {
+    manifestRequest = fetchJson('data/map/manifest.json').then((data) => {
+      manifest = data;
+      // A build date is not evidence of a fresh DOT source snapshot.
+      if (/^\d{4}-(0[1-9]|1[0-2])$/.test(data.sourceUpdated || '')) {
+        const month = new Date(`${data.sourceUpdated}-01T00:00:00Z`).toLocaleDateString('en-US', {
+          month: 'short', year: 'numeric', timeZone: 'UTC',
+        });
+        freshness.textContent = `Data from ${month}`;
+      } else if (/^\d{4}-\d{2}-\d{2}$/.test(data.sourceUpdated || '')) {
+        freshness.textContent = `Data from ${data.sourceUpdated}`;
+      }
+      return data;
+    }).catch((error) => {
+      manifestRequest = null;
+      throw error;
+    });
+  }
+  return manifestRequest;
+}
 
-function createMarker(map, infoWindow, { position, title, icon, infoHtml }) {
+function loadBorough(name) {
+  if (boroughData.has(name)) return Promise.resolve();
+  if (pendingLoads.has(name)) return pendingLoads.get(name);
+  loadErrors.delete(name);
+  const request = loadManifest().then(async () => {
+    const payload = await fetchJson(`data/map/${manifest.boroughs[name].file}`);
+    boroughData.set(name, ParkingData.prepareBorough(payload));
+  }).catch((error) => {
+    console.error(error);
+    loadErrors.add(name);
+  }).finally(() => {
+    pendingLoads.delete(name);
+    scheduleRender();
+  });
+  pendingLoads.set(name, request);
+  return request;
+}
+
+function loadBoroughs() {
+  for (const name of BOROUGHS) loadBorough(name);
+  scheduleRender();
+}
+
+function scheduleRender() {
+  if (renderQueued || !map) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    updateVisualization();
+  });
+}
+
+function element(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text) node.textContent = text;
+  return node;
+}
+
+function spotDetails(point) {
+  const card = element('article', 'spot-card');
+  card.append(element('h2', '', point.street));
+  card.append(element('p', 'spot-borough', point.borough));
+  const sides = { N: 'North', S: 'South', E: 'East', W: 'West' };
+  for (const sign of point.signs) {
+    const section = element('section', 'spot-sign');
+    section.append(element('p', 'spot-block', `${sign.from} to ${sign.to}`));
+    section.append(element('p', 'spot-side', sign.side
+      ? `${sides[sign.side.toUpperCase()] || sign.side} side of street`
+      : 'Street side not supplied in this snapshot'));
+    const schedule = ParkingData.cleaningSchedule(sign.description);
+    if (schedule) {
+      section.append(element('p', 'spot-label', 'Street cleaning'));
+      section.append(element('p', 'spot-schedule', schedule));
+    }
+    const disclosure = element('details', 'sign-description');
+    disclosure.append(element('summary', '', 'Original sign text'));
+    disclosure.append(element('p', '', sign.description));
+    section.append(disclosure);
+    card.append(section);
+  }
+  const links = element('div', 'spot-actions');
+  const coords = `${point.lat},${point.lng}`;
+  for (const [label, href] of [
+    ['Directions', `https://www.google.com/maps/dir/?api=1&destination=${coords}`],
+    ['Street View', `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${coords}`],
+  ]) {
+    const link = element('a', '', label);
+    link.href = href;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    links.append(link);
+  }
+  card.append(links);
+  card.append(element('p', 'spot-note', 'Check the signs on this block for current restrictions.'));
+  return card;
+}
+
+function createMarker(item) {
+  const isCluster = item.count > 1;
+  const point = item.point;
   const marker = new google.maps.Marker({
     map,
-    position,
-    title,
-    icon,
+    position: { lat: item.lat, lng: item.lng },
+    title: isCluster ? `${item.count} sign locations. Zoom in to explore.` : `${point.street}, ${point.borough}`,
+    icon: {
+      path: google.maps.SymbolPath.CIRCLE,
+      scale: isCluster ? 9 : 6,
+      fillColor: '#7c3aed', fillOpacity: 1,
+      strokeColor: '#ffffff', strokeWeight: 1.5,
+    },
+    zIndex: isCluster ? 2 : 1,
   });
-
-  marker.addListener("click", () => {
-    infoWindow.setContent(infoHtml || title);
-    infoWindow.open({
-      map,
-      anchor: marker,
-    });
+  marker.addListener('click', () => {
+    infoWindow.close();
+    if (isCluster) {
+      const bounds = new google.maps.LatLngBounds(
+        { lat: item.south, lng: item.west }, { lat: item.north, lng: item.east });
+      const previousZoom = map.getZoom();
+      map.fitBounds(bounds, 64);
+      map.setZoom(Math.min(20, Math.max(previousZoom + 1, Math.min(map.getZoom(), previousZoom + 3))));
+    } else {
+      infoWindow.setContent(spotDetails(point));
+      infoWindow.open({ map, anchor: marker });
+      openMarker = marker;
+    }
   });
-
   return marker;
 }
 
-function getRedIcon() {
-  if (cachedRedIcon) return cachedRedIcon;
-  cachedRedIcon = {
-    path: google.maps.SymbolPath.CIRCLE,
-    scale: 6,
-    fillColor: "#e53935",
-    fillOpacity: 0.95,
-    strokeColor: "#b71c1c",
-    strokeWeight: 1,
-  };
-  return cachedRedIcon;
-}
-
-function getRecordKey(rec) {
-  const lat = rec.sign_x_coord_lat || "";
-  const lng = rec.sign_y_coord_lon || "";
-  const street = (rec.on_street || "").toUpperCase();
-  const borough = (rec.borough || "").toUpperCase();
-  return `${lat}|${lng}|${street}|${borough}`;
-}
-
-function getHeatmapOverlayClass() {
-  if (HeatmapOverlay) return HeatmapOverlay;
-
-  HeatmapOverlay = class extends google.maps.OverlayView {
-    constructor({ radius = 24 } = {}) {
-      super();
-      this.radius = radius;
-      this.data = [];
-      this.canvas = null;
-      this.map = null;
+function updateVisualization() {
+  if (mapUnavailable) return;
+  const visibleBounds = map.getBounds();
+  if (!visibleBounds) return;
+  const ne = visibleBounds.getNorthEast();
+  const sw = visibleBounds.getSouthWest();
+  // Restrict queries to the data's NYC extent even if the map is panned far away.
+  const bounds = { south: Math.max(40, sw.lat()), north: Math.min(42, ne.lat()),
+    west: Math.max(-75, sw.lng()), east: Math.min(-72, ne.lng()) };
+  const points = [];
+  for (const name of BOROUGHS) {
+    const index = boroughData.get(name);
+    if (!index) continue;
+    for (const point of ParkingData.queryViewport(index, bounds)) {
+      point.borough = name;
+      points.push(point);
     }
-
-    setData(data) {
-      this.data = data;
-      this.draw();
-    }
-
-    setMap(map) {
-      this.map = map;
-      super.setMap(map);
-    }
-
-    onAdd() {
-      this.canvas = document.createElement("canvas");
-      this.canvas.style.position = "absolute";
-      this.canvas.style.pointerEvents = "none";
-      this.getPanes().overlayLayer.appendChild(this.canvas);
-    }
-
-    onRemove() {
-      if (this.canvas && this.canvas.parentNode) {
-        this.canvas.parentNode.removeChild(this.canvas);
-      }
-      this.canvas = null;
-    }
-
-    draw() {
-      if (!this.canvas || !this.map) return;
-
-      const projection = this.getProjection();
-      const bounds = this.map.getBounds();
-      if (!projection || !bounds) return;
-
-      const northEast = projection.fromLatLngToDivPixel(bounds.getNorthEast());
-      const southWest = projection.fromLatLngToDivPixel(bounds.getSouthWest());
-      const left = southWest.x;
-      const top = northEast.y;
-      const width = Math.max(1, northEast.x - southWest.x);
-      const height = Math.max(1, southWest.y - northEast.y);
-      const dpr = window.devicePixelRatio || 1;
-
-      this.canvas.style.left = `${left}px`;
-      this.canvas.style.top = `${top}px`;
-      this.canvas.style.width = `${width}px`;
-      this.canvas.style.height = `${height}px`;
-      this.canvas.width = Math.ceil(width * dpr);
-      this.canvas.height = Math.ceil(height * dpr);
-
-      const context = this.canvas.getContext("2d");
-      if (!context) return;
-      context.setTransform(dpr, 0, 0, dpr, 0, 0);
-      context.clearRect(0, 0, width, height);
-
-      this.data.forEach((point) => {
-        const pixel = projection.fromLatLngToDivPixel(point);
-        if (!pixel) return;
-
-        const x = pixel.x - left;
-        const y = pixel.y - top;
-        const gradient = context.createRadialGradient(x, y, 0, x, y, this.radius);
-        gradient.addColorStop(0, "rgba(229, 57, 53, 0.55)");
-        gradient.addColorStop(0.45, "rgba(255, 152, 0, 0.28)");
-        gradient.addColorStop(1, "rgba(255, 235, 59, 0)");
-
-        context.fillStyle = gradient;
-        context.beginPath();
-        context.arc(x, y, this.radius, 0, Math.PI * 2);
-        context.fill();
-      });
-    }
-  };
-
-  return HeatmapOverlay;
-}
-
-function parseCsv(text) {
-  const lines = text.trim().split(/\r?\n/);
-  if (lines.length < 2) return [];
-
-  const headers = lines[0].split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((h) => h.replace(/^"|"$/g, ""));
-
-  return lines.slice(1).map((line) => {
-    const cols = line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((c) => c.replace(/^"|"$/g, ""));
-    const record = {};
-    headers.forEach((h, i) => {
-      record[h] = cols[i];
-    });
-    return record;
-  });
-}
-
-async function loadSourceData() {
-  const response = await fetch("data/source.csv");
-  if (!response.ok) throw new Error(`Failed to load source.csv: ${response.status}`);
-  const text = await response.text();
-  return parseCsv(text);
-}
-
-let aspRecords = [];
-
-function hideActiveMarkers() {
-  const toRemove = Array.from(activeMarkerKeys);
-  toRemove.forEach((key) => {
-    const marker = markerCache.get(key);
-    if (marker) marker.setMap(null);
-    activeMarkerKeys.delete(key);
-  });
-}
-
-function updateVisualization(map, infoWindow) {
-  if (!aspRecords.length) return;
-  const bounds = map.getBounds();
-  if (!bounds) return;
-
-  const useHeatmap = map.getZoom() < MARKER_ZOOM_THRESHOLD;
-  const nextActiveKeys = new Set();
-  const heatmapPoints = [];
-
-  aspRecords.forEach((rec) => {
-    const borough = (rec.borough || "").toUpperCase();
-    if (!selectedBoroughs.has(borough)) return;
-
-    const lat = parseFloat(rec.sign_x_coord_lat);
-    const lng = parseFloat(rec.sign_y_coord_lon);
-    if (Number.isNaN(lat) || Number.isNaN(lng)) return;
-    const position = { lat, lng };
-
-    if (useHeatmap) {
-      if (bounds.contains(position)) {
-        heatmapPoints.push(new google.maps.LatLng(lat, lng));
-      }
-      return;
-    }
-
-    if (!bounds.contains(position)) return;
-
-    const key = getRecordKey(rec);
-    let marker = markerCache.get(key);
-    if (!marker) {
-      const title = `${rec.on_street || ""} (${rec.borough || ""})`;
-      const infoHtml = `
-        <div style="max-width: 260px; font-size: 13px;">
-          <div style="font-weight: 600; margin-bottom: 4px;">${rec.on_street || ""} (${rec.borough || ""})</div>
-          <div><strong>From:</strong> ${rec.from_street || ""}</div>
-          <div><strong>To:</strong> ${rec.to_street || ""}</div>
-          <div style="margin-top: 6px;">${rec.sign_description || ""}</div>
-          <div style="margin-top: 8px;"><a href="https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lng}" target="_blank" rel="noopener">Open Street View</a></div>
-        </div>
-      `;
-
-      marker = createMarker(map, infoWindow, {
-        position,
-        title,
-        icon: getRedIcon(),
-        infoHtml,
-      });
-      markerCache.set(key, marker);
-    } else if (!marker.getMap()) {
-      marker.setMap(map);
-    }
-
-    nextActiveKeys.add(key);
-  });
-
-  if (useHeatmap) {
-    hideActiveMarkers();
-    if (!heatmapLayer) {
-      const Heatmap = getHeatmapOverlayClass();
-      heatmapLayer = new Heatmap({ radius: 24 });
-    }
-    heatmapLayer.setData(heatmapPoints);
-    heatmapLayer.setMap(heatmapPoints.length ? map : null);
-    return;
   }
-
-  if (heatmapLayer) {
-    heatmapLayer.setMap(null);
+  const zoom = Math.floor(map.getZoom());
+  let items;
+  if (zoom < 17 || points.length > 400) {
+    let cellPixels = 64;
+    do {
+      items = ParkingData.clusterPoints(points, zoom, cellPixels);
+      cellPixels *= 2;
+    } while (items.length > 400);
+  } else {
+    items = points.map((point) => ({ count: 1, point, lat: point.lat, lng: point.lng }));
   }
-
-  const toRemove = Array.from(activeMarkerKeys).filter((key) => !nextActiveKeys.has(key));
-  toRemove.forEach((key) => {
-    const marker = markerCache.get(key);
-    if (marker) marker.setMap(null);
-    activeMarkerKeys.delete(key);
-  });
-
-  nextActiveKeys.forEach((key) => activeMarkerKeys.add(key));
-}
-
-function setupBoroughFilters(onChange) {
-  const container = document.getElementById("borough-filters");
-  if (!container) return;
-
-  BOROUGH_OPTIONS.forEach((name) => {
-    const id = `borough-${name.toLowerCase()}`;
-    const label = document.createElement("label");
-    label.style.marginRight = "14px";
-
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.id = id;
-    checkbox.name = id;
-    checkbox.checked = selectedBoroughs.has(name.toUpperCase());
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked) {
-        selectedBoroughs.add(name.toUpperCase());
-      } else {
-        selectedBoroughs.delete(name.toUpperCase());
+  const nextKeys = new Set();
+  for (const item of items) {
+    // Coordinates and count keep click handlers in sync when viewport clusters change.
+    const key = item.count > 1 ? `cluster:${zoom}:${item.key}:${item.count}:${item.lat}:${item.lng}`
+      : `spot:${item.point.borough}:${item.point.key}`;
+    nextKeys.add(key);
+    if (!activeMarkers.has(key)) activeMarkers.set(key, createMarker(item));
+  }
+  for (const [key, marker] of activeMarkers) {
+    if (!nextKeys.has(key)) {
+      if (openMarker === marker) {
+        infoWindow.close();
+        openMarker = null;
       }
-      onChange();
-    });
-
-    const text = document.createElement("span");
-    text.textContent = name;
-    text.style.marginLeft = "4px";
-
-    label.appendChild(checkbox);
-    label.appendChild(text);
-    container.appendChild(label);
-  });
+      google.maps.event.clearInstanceListeners(marker);
+      marker.setMap(null);
+      activeMarkers.delete(key);
+    }
+  }
+  const loading = BOROUGHS.filter((name) => pendingLoads.has(name));
+  const failed = BOROUGHS.filter((name) => loadErrors.has(name));
+  if (loading.length) showStatus(`Loading ${loading.join(', ')}…`);
+  else if (failed.length) showStatus(`Couldn’t load ${failed.join(', ')}. Check your connection and retry.`, true);
+  else if (!points.length) showStatus('No sign locations here. Move the map to explore nearby streets.');
+  else showStatus(`${points.length.toLocaleString()} sign locations in view. ${items.some((item) => item.count > 1)
+    ? 'Tap a larger dot to zoom in.' : 'Tap a dot for sign details.'}`);
 }
 
-window.initMap = async function initMap() {
-  const map = new google.maps.Map(document.getElementById("map"), {
-    center: nycCenter,
-    zoom: 15,
-  });
+function mapLoadFailed() {
+  mapUnavailable = true;
+  clearTimeout(mapLoadTimer);
+  showStatus('The map couldn’t load. Check your connection and retry.', true);
+}
 
-  const infoWindow = new google.maps.InfoWindow();
-  setupBoroughFilters(() => updateVisualization(map, infoWindow));
+window.gm_authFailure = mapLoadFailed;
+window.mapLoadFailed = mapLoadFailed;
+const mapLoadTimer = setTimeout(mapLoadFailed, 20000);
+retryButton.addEventListener('click', () => {
+  if (!map || mapUnavailable) window.location.reload();
+  else loadBoroughs();
+});
 
+window.initMap = function initMap() {
+  clearTimeout(mapLoadTimer);
   try {
-    aspRecords = await loadSourceData();
-    updateVisualization(map, infoWindow);
-    map.addListener("idle", () => {
-      clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => updateVisualization(map, infoWindow), IDLE_DEBOUNCE_MS);
+    map = new google.maps.Map(document.getElementById('map'), {
+      center: { lat: 40.7158, lng: -73.9970 }, zoom: 15, minZoom: 10, maxZoom: 20,
+      mapTypeControl: false, streetViewControl: false,
+      styles: [{ featureType: 'poi', stylers: [{ visibility: 'off' }] }],
     });
-  } catch (err) {
-    console.error(err);
+    mapUnavailable = false;
+    infoWindow = new google.maps.InfoWindow({ maxWidth: 320 });
+    map.addListener('idle', () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(scheduleRender, 100);
+    });
+    loadBoroughs();
+  } catch (error) {
+    console.error(error);
+    map = null;
+    mapLoadFailed();
   }
 };

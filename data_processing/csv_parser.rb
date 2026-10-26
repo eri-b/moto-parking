@@ -68,7 +68,7 @@ CSV.open(OUTPUT, 'w') do |out|
 
     # 4) On the first row, write headers + our new columns
     if first_row
-      out << ['borough', 'on_street', 'from_street', 'to_street', 'sign_description', 'sign_x_coord_lat', 'sign_y_coord_lon']
+      out << ['borough', 'on_street', 'from_street', 'to_street', 'sign_description', 'sign_x_coord_lat', 'sign_y_coord_lon', 'side_of_street']
       first_row = false
     end
 
@@ -77,7 +77,8 @@ CSV.open(OUTPUT, 'w') do |out|
       row['on_street'].to_s.strip,
       row['from_street'].to_s.strip,
       row['to_street'].to_s.strip,
-      desc.to_s.strip
+      desc.to_s.strip,
+      row['side_of_street'].to_s.strip
     ]
 
     next if seen_keys.include?(key)
@@ -93,7 +94,8 @@ CSV.open(OUTPUT, 'w') do |out|
       row['to_street'],
       desc,
       lat,
-      lon
+      lon,
+      row['side_of_street']
     ]
   end
 end
